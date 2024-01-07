@@ -1,0 +1,243 @@
+// Dither/FMV shader
+// by Millennium Cyborg
+// for use with OBS and either StreamFX or obs-shaderfilter
+
+// Loosely based on the encoding method in ffmpeg's RPZA encoder:
+// https://ffmpeg.org/doxygen/trunk/rpzaenc_8c_source.html
+
+////////////////////////////////////////////////////////////////
+// Detect StreamFX with defines only provides by StreamFX
+
+#ifdef GS_DEVICE_DIRECT3D
+#define PLUGIN_STREAMFX
+#endif
+
+#ifdef GS_DEVICE_OPENGL
+#define PLUGIN_STREAMFX
+#endif
+
+#ifndef PLUGIN_STREAMFX
+#define PLUGIN_SHADERFILTER
+#endif
+
+////////////////////////////////////////////////////////////////
+// Compatibility declations and definitions
+
+// Always provided by OBS
+uniform float4x4 ViewProj<
+    bool automatic = true;
+    string name = "View Projection Matrix";
+>;
+
+#ifdef PLUGIN_STREAMFX
+
+// Provided by StreamFX
+uniform texture2d InputA<
+    bool automatic = true;
+>;
+
+uniform float4 ViewSize<
+    bool automatic = true;
+>;
+
+#define SOURCE_SIZE_PX ViewSize
+#define INPUT_TEX InputA
+#define OUTPUT_CONVERSION
+#define INPUT_CONVERSION
+
+#endif
+
+#ifdef PLUGIN_SHADERFILTER
+
+uniform texture2d image;
+
+// For now, not implementing uv_offset and uv_scale
+uniform float2 uv_size;
+
+#define SOURCE_SIZE_PX uv_size
+#define INPUT_TEX image
+#define OUTPUT_CONVERSION srgb_nonlinear_to_linear
+#define INPUT_CONVERSION srgb_linear_to_nonlinear
+
+#endif
+
+////////////////////////////////////////////////////////////////
+// Shader parameters
+
+uniform float _01_PixelScale<
+    bool automatic = false;
+    string name = "Pixel Scale";
+    string description = "> 1 for nearest-neighbour downsampling";
+    string field_type = "slider";
+    float minimum = 1;
+    float maximum = 8;
+    float step = 0.1;
+> = 1;
+
+uniform float _01b_PixelAspect<
+    bool automatic = false;
+    string name = "Pixel Aspect";
+    string description = "Non-square pixels if != 1";
+    string field_type = "slider";
+    float minimum = -4;
+    float maximum = 4;
+    float step = 0.1;
+> = 1;
+
+uniform float _02_ColorQuant<
+    bool automatic = false;
+    string name = "Color Values Per Channel";
+    string description = "Quantize color down to this many values per channel";
+    string field_type = "slider";
+    float minimum = 1;
+    float maximum = 256;
+    float step = 1;
+> = 16;
+
+uniform float _03_Dither_Strength<
+    bool automatic = false;
+    string name = "Dither Strength";
+    string description = "More dither!!";
+    string field_type = "slider";
+    float minimum = 0;
+    float maximum = 5.0;
+    float step = 0.1;
+> = 1.0;
+
+uniform float _04_DitherSuperScale<
+    bool automatic = false;
+    string name = "Dither Superscale";
+    string description = "uhhhh neat effect";
+    string field_type = "slider";
+    float minimum = 1;
+    float maximum = 8;
+    float step = 0.1;
+> = 1;
+
+uniform bool _05_FMV_Encode<
+    string label = "FMV encode (default: true)";
+> = true;
+
+uniform float _06_Threshold_Solid<
+    string label = "Threshold: Solid (1-color block) (default: 0.015)";
+    string widget_type = "slider";
+    float minimum = 0.0;
+    float maximum = 1.0;
+    float step = 0.001;
+> = 0.015;
+
+uniform float _07_Threshold_Gradient<
+    string label = "Threshold: Gradient (4-color block) (default: 0.027)";
+    string widget_type = "slider";
+    float minimum = 0.0;
+    float maximum = 1.0;
+    float step = 0.001;
+> = 0.027;
+
+////////////////////////////////////////////////////////////////
+// Shader code
+
+sampler_state def_sampler {
+    AddressU  = Clamp;
+    AddressV  = Clamp;
+    Filter    = Linear;
+};
+
+struct VertData {
+    float4 pos : POSITION;
+    float2 uv  : TEXCOORD0;
+};
+
+VertData VSDefault(VertData v_in) {
+    VertData vert_out;
+    vert_out.pos = mul(float4(v_in.pos.xyz, 1.0), ViewProj);
+    vert_out.uv  = v_in.uv;
+    return vert_out;
+}
+
+float2 pxFromUv(float2 uv) {
+  return floor(uv * SOURCE_SIZE_PX.xy);
+}
+
+float2 uvFromPx(float2 px) {
+  return (px-0.5f) / SOURCE_SIZE_PX.xy;
+}
+
+// From libobs/data/color.effect
+// Can't get the relevant include to work at the moment
+
+float srgb_linear_to_nonlinear_channel(float u)
+{
+    return (u <= 0.0031308) ? (12.92 * u) : ((1.055 * pow(u, 1. / 2.4)) - 0.055);
+}
+
+float3 srgb_linear_to_nonlinear(float3 v)
+{
+    return float3(srgb_linear_to_nonlinear_channel(v.r), srgb_linear_to_nonlinear_channel(v.g), srgb_linear_to_nonlinear_channel(v.b));
+}
+
+float srgb_nonlinear_to_linear_channel(float u)
+{
+    return (u <= 0.04045) ? (u / 12.92) : pow((u + 0.055) / 1.055, 2.4);
+}
+
+float3 srgb_nonlinear_to_linear(float3 v)
+{
+    return float3(srgb_nonlinear_to_linear_channel(v.r), srgb_nonlinear_to_linear_channel(v.g), srgb_nonlinear_to_linear_channel(v.b));
+}
+
+float4 PSDefault(VertData v_in) : TARGET {
+    float2 uv = v_in.uv;
+    float2 px = pxFromUv(uv); // pixel center
+  
+    // Pixel aspect
+    float pxAspect = _01b_PixelAspect;
+    if (pxAspect == 0) { pxAspect = 1; }
+    if (pxAspect < 0) { pxAspect = 1/pxAspect; }
+    float2 pxScale = _01_PixelScale * float2(pxAspect, 1);
+
+    // Quantize position
+    
+    px = floor( px / pxScale ) * pxScale;
+    uv = uvFromPx(px);
+  
+    // Get source color
+    float4 col = INPUT_TEX.Sample(def_sampler, uv);
+    col.rgb = INPUT_CONVERSION(col.rgb);
+  
+    // Dither
+    const float4x4 ditherTableOld = {
+        -4.0, 0.0, -3.0, 1.0,
+        2.0, -2.0, 3.0, -1.0,
+        -3.0, 1.0, -4.0, 0.0,
+        3.0, -1.0, 2.0, -2.0
+    };
+    const float4x4 ditherTable =
+    {
+         0,  8,  2, 10,
+        12,  4, 14,  6,
+         3, 11,  1,  9,
+        15,  7, 13,  5
+    };
+
+    int2 dither_idx = floor( px / (pxScale*_04_DitherSuperScale) );
+    dither_idx %= 4;
+    col.rgb += ditherTable[dither_idx.x][dither_idx.y] * 0.005 * _03_Dither_Strength;
+  
+    // Quantize color
+    float Q = _02_ColorQuant - 1;
+    col.rgb = round(col.rgb * Q) / Q;
+
+    col.rgb = OUTPUT_CONVERSION(col.rgb);
+
+    return col;
+}
+
+technique Draw
+{
+    pass
+    {
+        vertex_shader = VSDefault(v_in);
+        pixel_shader  = PSDefault(v_in); 
+    }
+}
