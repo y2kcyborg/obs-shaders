@@ -1,0 +1,280 @@
+// Dither/FMV shader
+// by Millennium Cyborg
+// for use with OBS and either StreamFX or obs-shaderfilter
+
+// Loosely based on Chris Long's video here:
+// https://www.youtube.com/watch?v=TdTMeNXCnTs
+
+////////////////////////////////////////////////////////////////
+// Detect StreamFX with defines only provides by StreamFX
+
+#ifdef GS_DEVICE_DIRECT3D
+#define MIL_PLUGIN_STREAMFX
+#endif
+
+#ifdef GS_DEVICE_OPENGL
+#define MIL_PLUGIN_STREAMFX
+#endif
+
+#ifndef MIL_PLUGIN_STREAMFX
+#define MIL_PLUGIN_SHADERFILTER
+#endif
+
+////////////////////////////////////////////////////////////////
+// Compatibility declations and definitions
+
+// Always provided by OBS
+uniform float4x4 ViewProj<
+    bool automatic = true;
+    string name = "View Projection Matrix";
+>;
+
+#ifdef MIL_PLUGIN_STREAMFX
+
+// Provided by StreamFX
+uniform texture2d InputA<
+    bool automatic = true;
+>;
+
+uniform float4 ViewSize<
+    bool automatic = true;
+>;
+
+#define MIL_SOURCE_SIZE_TX ViewSize
+#define MIL_INPUT_TEX InputA
+#define MIL_OUTPUT_CONV
+#define MIL_INPUT_CONV
+
+#endif
+
+#ifdef MIL_PLUGIN_SHADERFILTER
+
+uniform texture2d image;
+
+// For now, not implementing uv_offset and uv_scale
+uniform float2 uv_size;
+
+#define MIL_SOURCE_SIZE_TX uv_size
+#define MIL_INPUT_TEX image
+#define MIL_OUTPUT_CONV srgb_nonlinear_to_linear
+#define MIL_INPUT_CONV srgb_linear_to_nonlinear
+
+#endif
+
+////////////////////////////////////////////////////////////////
+// Shader parameters
+
+uniform float _01_PixelScale<
+    bool automatic = false;
+    string name = "Pixel Scale (default = 3.0)";
+    string description = "> 1 for nearest-neighbour downsampling";
+    string field_type = "slider";
+    string widget_type = "slider";
+    float minimum = 1;
+    float maximum = 8;
+    float step = 0.1;
+> = 3.0;
+
+uniform float _01b_PixelAspect<
+    bool automatic = false;
+    string name = "Pixel Aspect (default = 1.0)";
+    string description = "Non-square pixels if != 1";
+    string field_type = "slider";
+    string widget_type = "slider";
+    float minimum = -4;
+    float maximum = 4;
+    float step = 0.1;
+> = 1.0;
+
+uniform float _02_ColorQuant<
+    bool automatic = false;
+    string name = "Color Values Per Channel (default = 32)";
+    string description = "Quantize color down to this many values per channel";
+    string field_type = "slider";
+    string widget_type = "slider";
+    float minimum = 1;
+    float maximum = 256;
+    float step = 1;
+> = 32;
+
+uniform bool _03_RGB_Noise<
+    string name = "RGB Noise (default: false)";
+> = false;
+
+uniform float _04_Noise_Gamma <
+    string name = "Noise Gamma (default: 1.0)";
+    string field_type = "slider";
+    string widget_type = "slider";
+    float minimum = 0.3;
+    float maximum = 3.0;
+    float step = 0.01;
+> = 1.0;
+
+uniform float _05_Noise_Bias<
+    string name = "Noise Bias (default: 0.0)";
+    string field_type = "slider";
+    string widget_type = "slider";
+    float minimum = -1.0;
+    float maximum = 1.0;
+    float step = 0.01;
+> = 0.0;
+
+uniform float _06_Noise_Scale<
+    string name = "Noise Scale (default: 1.0)";
+    string field_type = "slider";
+    string widget_type = "slider";
+    float minimum = 0.0;
+    float maximum = 2.0;
+    float step = 0.001;
+> = 1.0;
+
+////////////////////////////////////////////////////////////////
+// Shader code
+
+sampler_state def_sampler {
+    AddressU  = Clamp;
+    AddressV  = Clamp;
+    Filter    = Linear;
+};
+
+struct VertData {
+    float4 pos : POSITION;
+    float2 uv  : TEXCOORD0;
+};
+
+VertData VSDefault(VertData v_in) {
+    VertData vert_out;
+    vert_out.pos = mul(float4(v_in.pos.xyz, 1.0), ViewProj);
+    vert_out.uv  = v_in.uv;
+    return vert_out;
+}
+
+// UV: 0 to 1
+// tx: 0 to MIL_SOURCE_SIZE_TX-1
+// px: depends on pixel scale and aspect ratio
+
+float2 txFromUv(float2 uv) {
+    return floor(uv * MIL_SOURCE_SIZE_TX.xy);
+}
+
+float2 uvFromTx(float2 tx) {
+    return (tx + 0.5) / MIL_SOURCE_SIZE_TX.xy;
+}
+
+float2 pxFromTx(float2 tx, float2 pxScale)
+{
+    return floor(tx / pxScale);
+}
+
+float2 txFromPx(float2 px, float2 pxScale)
+{
+    return floor((px + 0.5f) * pxScale);
+}
+
+// From libobs/data/color.effect
+// Can't get the relevant include to work at the moment
+
+float srgb_linear_to_nonlinear_channel(float u)
+{
+    return (u <= 0.0031308) ? (12.92 * u) : ((1.055 * pow(u, 1. / 2.4)) - 0.055);
+}
+
+float3 srgb_linear_to_nonlinear(float3 v)
+{
+    return float3(srgb_linear_to_nonlinear_channel(v.r), srgb_linear_to_nonlinear_channel(v.g), srgb_linear_to_nonlinear_channel(v.b));
+}
+
+float srgb_nonlinear_to_linear_channel(float u)
+{
+    return (u <= 0.04045) ? (u / 12.92) : pow((u + 0.055) / 1.055, 2.4);
+}
+
+float3 srgb_nonlinear_to_linear(float3 v)
+{
+    return float3(srgb_nonlinear_to_linear_channel(v.r), srgb_nonlinear_to_linear_channel(v.g), srgb_nonlinear_to_linear_channel(v.b));
+}
+
+// hash by iq: https://www.shadertoy.com/view/Msf3WH
+// modified to range 0-1
+float2 iq_hash2(float2 p)
+{
+    p = float2(dot(p, float2(127.1, 311.7)), dot(p, float2(269.5, 183.3)));
+    return frac(sin(p) * 43758.5453123);
+}
+
+float3 quantize(float3 col, float dither)
+{
+    float Q = _02_ColorQuant - 1;
+    return round(col * Q + dither) / Q;
+}
+
+float sampleAlpha(float2 px, float2 pxScale)
+{
+    float2 tx = txFromPx(px, pxScale);
+
+    // Get source color, preserving alpha
+    float4 col = MIL_INPUT_TEX.Sample(def_sampler, uvFromTx(tx));
+    return col.a;
+}
+
+float noiseTransform(float x)
+{
+    return pow((x * _06_Noise_Scale) + _05_Noise_Bias, _04_Noise_Gamma);
+}
+
+float3 sampleNoise(float2 uv, float mask)
+{
+    // This is how we get a different noise pattern when masked
+    if (mask > 0.5f)
+    {
+        uv.xy = uv.yx;
+    }
+
+    if (_03_RGB_Noise)
+    {
+        // Arbitrary numbers
+        float2 n12 = iq_hash2(uv).xy;
+        float n3 = iq_hash2(uv * 1.3333f).x;
+        return float3(noiseTransform(n12.x), noiseTransform(n12.y), noiseTransform(n3));
+    }
+    else
+    {
+        float c = noiseTransform(iq_hash2(uv).x);
+        return float3(c, c, c);
+    }
+}
+
+float4 PSDefault(VertData v_in) : TARGET {
+    float2 uv = v_in.uv;
+    float2 tx = txFromUv(uv); // pixel center
+
+    // Pixel aspect
+    float pxAspect = _01b_PixelAspect;
+
+    if (pxAspect == 0)
+        pxAspect = 1;
+
+    if (pxAspect < 0)
+        pxAspect = 1 / pxAspect;
+
+    float2 pxScale = _01_PixelScale * float2(pxAspect, 1);
+
+    float2 px = pxFromTx(tx, pxScale);
+  
+    float mask = sampleAlpha(px, pxScale);
+
+    float4 col = float4(quantize(sampleNoise(uvFromTx(txFromPx(px, pxScale)), mask), 0.0), 1);
+
+    col.rgb = MIL_OUTPUT_CONV(col.rgb);
+
+    return col;
+}
+
+technique Draw
+{
+    pass
+    {
+        vertex_shader = VSDefault(v_in);
+        pixel_shader  = PSDefault(v_in);
+    }
+}

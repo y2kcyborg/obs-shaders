@@ -26,3 +26,29 @@ frames like in RPZA.
 
 I recommend applying this to a scene rather than an individual source - or if you apply
 it to a source, make sure it's at its original size. Otherwise the pixel scale might be off!
+
+# Noise Mask / Invisible When Paused
+
+Inspired by this video and its follow-ups, but made more eye-safe:
+https://www.youtube.com/watch?v=TdTMeNXCnTs (Heed the flashing warnings on the follow-ups!)
+
+The original has randomly bouncing lines drawn with XOR over an accumulating frame buffer.
+After some time, the frame buffer is effectively random noise, and looks like nothing when paused,
+but when a line is drawn the eye can pick up the changed pixels and generates an illusion of motion.
+
+There are some follow-up videos rendering Bad Apple with this technique, but for large solid areas to
+be visible they have to be flashing every other frame which is some of the worst flickering I've seen in video.
+
+This shader does something a little simpler. If we start from the idea that we want an image full of noise,
+with no edges visible when paused, but with the actual noise values changing with scene motion, then another
+solution is to mask between two different but statistically indistinguishable noise fields.
+
+The disadvantages are that only edges in motion will be visible, and not solid areas; and that
+only on average half of the pixels along edges will change, as opposed to all of them.
+
+The advantages are that it's much easier on the eyes, and it's cheap! You could even do it by masking between
+two suitable images, using the a Dynamic Mask or similar filter.
+
+Here, I provide a version with some configurable noise parameters.
+The filter should be applied to a source that is alpha masked - this could come from a chroma key,
+a video with alpha, or a vtuber model from an app with Spout and transparency enabled.
